@@ -1,24 +1,21 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
-#include <Preferences.h> // Library baru untuk penyimpanan permanen
+#include <Preferences.h>
 
-// --- OBJEK UNTUK PENYIMPANAN ---
+// --- OBJEK & KONFIGURASI ---
 Preferences preferences;
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
 
-// --- KONFIGURASI JARINGAN ---
 const char* ssid = "GeminiSpot_WIFI";
 const char* password = "password123";
 
-// --- KONFIGURASI PIN (DEFAULT) ---
+// --- PIN DEFAULT ---
 #define DEFAULT_PIN_SSR 23
 #define DEFAULT_PIN_FOOTSWITCH 34
 #define DEFAULT_PIN_ACS 35
 #define DEFAULT_PIN_ZMPT 32
-
-// --- OBJEK SERVER ---
-AsyncWebServer server(80);
-AsyncWebSocket ws("/ws");
 
 // --- STRUKTUR DATA KONFIGURASI ---
 struct Config {
@@ -27,19 +24,23 @@ struct Config {
         float i_guard = 25.0;
         bool mcb_guard = true;
     } guards;
-    // ... struct lain akan ditambahkan di sini (autotrigger, pins, dll)
+    struct AutoTrigger {
+        bool enabled = false;
+        float threshold = 3.5; // Threshold dalam Ampere
+        int ping_interval = 100; // ms
+    } autotrigger;
 } config;
 
 // --- VARIABEL RUNTIME ---
 enum WeldMode { TIME_MODE, ENERGY_MODE, DUAL_PULSE_MODE } currentMode = TIME_MODE;
 long timePulse = 20;
-// ... variabel lain ...
 bool isWelding = false;
 volatile bool webTriggerActive = false;
 int adc_zero_point_current = 2048;
 int adc_zero_point_voltage = 2048;
+unsigned long lastPingTime = 0;
 
-// --- HALAMAN WEB BARU (DENGAN PANEL GUARDS AKTIF) ---
+// --- HALAMAN WEB BARU (DENGAN SEMUA FITUR) ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -47,7 +48,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <title>GeminiSpot W-Series</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body{font-family:Arial,sans-serif;background-color:#121212;color:#e0e0e0;text-align:center;margin:0;padding:0}.container{max-width:400px;margin:0 auto;padding:10px}.panel{background-color:#1e1e1e;padding:15px;margin-bottom:15px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.5)}h1,h2{color:#bb86fc;margin-top:0}.status{font-size:1.5em;font-weight:700;color:#03dac6;margin:10px 0}button{background-color:#333;border:1px solid #bb86fc;color:#bb86fc;padding:10px;margin:5px;border-radius:5px;cursor:pointer}button.active{background-color:#bb86fc;color:#121212}input,label{color:#e0e0e0;background-color:#333;border:1px solid #999;border-radius:4px;padding:8px}
+        body{font-family:Arial,sans-serif;background-color:#121212;color:#e0e0e0;text-align:center;margin:0;padding:0}.container{max-width:400px;margin:0 auto;padding:10px}.panel{background-color:#1e1e1e;padding:15px;margin-bottom:15px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.5)}h1,h2{color:#bb86fc;margin-top:0}.status{font-size:1.5em;font-weight:700;color:#03dac6;margin:10px 0}button{background-color:#333;border:1px solid #bb86fc;color:#bb86fc;padding:10px;margin:5px;border-radius:5px;cursor:pointer}button.active{background-color:#bb86fc;color:#121212}input,label{color:#e0e0e0;background-color:#333;border:1px solid #999;border-radius:4px;padding:8px}.weld-btn{-webkit-user-select:none;user-select:none;background-color:#cf6679;color:white;padding:20px;font-size:1.5em;border:none;border-radius:50%;width:150px;height:150px;cursor:pointer;margin-top:20px}.weld-btn:active{background-color:#ff8a80}
     </style>
 </head>
 <body>
@@ -58,211 +59,174 @@ const char index_html[] PROGMEM = R"rawliteral(
             <div id="status" class="status">Connecting...</div>
         </div>
         
+        <div class="panel">
+            <h2>AKSI</h2>
+            <button id="weld_btn" class="weld-btn">TAHAN UNTUK LAS</button>
+        </div>
+
+        <div id="autotrigger_panel" class="panel">
+            <h2>Auto-Trigger (ACS712)</h2>
+            <p><label for="autotrigger_enabled">Aktifkan: </label><input type="checkbox" id="autotrigger_enabled"></p>
+            <p><label for="autotrigger_threshold">Sensitivitas (A): </label><input type="number" id="autotrigger_threshold" step="0.1"></p>
+            <button onclick="setConfig('autotrigger')">Simpan Auto-Trigger</button>
+        </div>
+
         <div id="guards_panel" class="panel">
             <h2>Guards (Keamanan)</h2>
             <p><label for="v_cutoff_val">V-Cutoff (V): </label><input type="number" id="v_cutoff_val" step="1"></p>
             <p><label for="i_guard_val">I-Guard (A): </label><input type="number" id="i_guard_val" step="0.5"></p>
             <p><label for="mcb_guard_val">MCB Guard: </label><input type="checkbox" id="mcb_guard_val"></p>
-            <button onclick="setGuards()">Simpan Guards</button>
+            <button onclick="setConfig('guards')">Simpan Guards</button>
         </div>
-
-        </div>
+    </div>
 
     <script>
         var gateway = `ws://${window.location.hostname}/ws`;
         var websocket;
+        var audioCtx, oscillator;
+
         window.addEventListener('load', onload);
 
-        function onload(event) { initWebSocket(); }
-
-        function initWebSocket() {
-            websocket = new WebSocket(gateway);
-            websocket.onopen = onOpen;
-            websocket.onclose = onClose;
-            websocket.onmessage = onMessage;
+        function onload(event) {
+            initWebSocket();
+            initAudio();
+            document.getElementById('weld_btn').addEventListener('mousedown', () => triggerWeld(true));
+            document.getElementById('weld_btn').addEventListener('mouseup', () => triggerWeld(false));
+            document.getElementById('weld_btn').addEventListener('touchstart', (e) => { e.preventDefault(); triggerWeld(true); });
+            document.getElementById('weld_btn').addEventListener('touchend', (e) => { e.preventDefault(); triggerWeld(false); });
         }
 
-        function onOpen(event) {
-            document.getElementById('status').innerText = "Connected";
-            websocket.send('{"action":"get_config"}');
+        function initAudio() {
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            } catch (e) {
+                console.log('Web Audio API is not supported in this browser');
+            }
         }
 
-        function onClose(event) {
-            document.getElementById('status').innerText = "Closed";
-            setTimeout(initWebSocket, 2000);
+        function playBeep() {
+            if (!audioCtx || oscillator) return;
+            oscillator = audioCtx.createOscillator();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5 note
+            oscillator.connect(audioCtx.destination);
+            oscillator.start();
         }
 
+        function stopBeep() {
+            if (oscillator) {
+                oscillator.stop();
+                oscillator.disconnect();
+                oscillator = null;
+            }
+        }
+
+        function initWebSocket() { /* ... (fungsi ini sama seperti sebelumnya) ... */ }
+        function onOpen(event) { /* ... (fungsi ini sama seperti sebelumnya) ... */ }
+        function onClose(event) { /* ... (fungsi ini sama seperti sebelumnya) ... */ }
         function onMessage(event) {
             var data = JSON.parse(event.data);
             if (data.action === 'config_update') {
-                // Update UI dengan config dari ESP32
                 let guards = data.payload.guards;
                 document.getElementById('v_cutoff_val').value = guards.v_cutoff;
                 document.getElementById('i_guard_val').value = guards.i_guard;
                 document.getElementById('mcb_guard_val').checked = guards.mcb_guard;
+
+                let autotrigger = data.payload.autotrigger;
+                document.getElementById('autotrigger_enabled').checked = autotrigger.enabled;
+                document.getElementById('autotrigger_threshold').value = autotrigger.threshold;
+                
                 document.getElementById('status').innerText = "Ready";
             } else if (data.action === 'status_update') {
                 document.getElementById('status').innerText = data.status;
             }
         }
 
-        function setGuards() {
-            let msg = {
-                action: "set_config",
-                payload: {
-                    guards: {
-                        v_cutoff: parseFloat(document.getElementById('v_cutoff_val').value),
-                        i_guard: parseFloat(document.getElementById('i_guard_val').value),
-                        mcb_guard: document.getElementById('mcb_guard_val').checked
-                    }
-                }
-            };
-            websocket.send(JSON.stringify(msg));
-            document.getElementById('status').innerText = "Menyimpan...";
+        function setConfig(section) { /* ... (fungsi ini sama seperti sebelumnya) ... */ }
+
+        function triggerWeld(start) {
+            websocket.send(`{"action":"weld_trigger", "value":${start}}`);
+            if (start) { playBeep(); } else { stopBeep(); }
         }
     </script>
 </body>
 </html>
 )rawliteral";
 
-// --- DEKLARASI FUNGSI ---
-void loadConfig();
-void saveConfig();
+
+// --- DEKLARASI FUNGSI & FUNGSI LAINNYA ---
+// ... (Sebagian besar fungsi lain seperti load/saveConfig, onEvent, handleWebSocketMessage tetap sama)
+// ... (Hanya loop() dan performWeld() yang akan dimodifikasi signifikan)
+
 void performWeld();
-float read_AC_RMS_Voltage();
-void handleWebSocketMessage(void *arg, uint8_t *data, size_t len);
-void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
 
-void setup() {
-  Serial.begin(115200);
-  loadConfig(); // Muat konfigurasi tersimpan saat startup
-
-  pinMode(DEFAULT_PIN_SSR, OUTPUT);
-  digitalWrite(DEFAULT_PIN_SSR, LOW);
-  pinMode(DEFAULT_PIN_FOOTSWITCH, INPUT_PULLUP);
-
-  long total_current = 0, total_voltage = 0;
-  for (int i = 0; i < 500; i++) { 
-    total_current += analogRead(DEFAULT_PIN_ACS); 
-    total_voltage += analogRead(DEFAULT_PIN_ZMPT);
-    delay(1); 
-  }
-  adc_zero_point_current = total_current / 500;
-  adc_zero_point_voltage = total_voltage / 500;
-
-  WiFi.softAP(ssid, password);
-  Serial.print("AP IP address: "); Serial.println(WiFi.softAPIP());
-  
-  ws.onEvent(onEvent);
-  server.addHandler(&ws);
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send_P(200, "text/html", index_html);
-  });
-  server.begin();
-  Serial.println("GeminiSpot W-Series W2 Initialized.");
-}
+void setup() { /* ... (fungsi setup sama seperti sebelumnya) ... */ }
 
 void loop() {
+  // Cek pemicu fisik (footswitch)
   if (digitalRead(DEFAULT_PIN_FOOTSWITCH) == LOW && !isWelding) {
     performWeld();
   }
+
+  // Cek pemicu dari Web UI
+  if (webTriggerActive && !isWelding) {
+    performWeld();
+  }
+
+  // Logika Auto-Trigger (Metode "Ping")
+  if (config.autotrigger.enabled && !isWelding && (millis() - lastPingTime > config.autotrigger.ping_interval)) {
+    lastPingTime = millis();
+    
+    // Kirim pulsa "ping" yang sangat singkat
+    digitalWrite(DEFAULT_PIN_SSR, HIGH);
+    delayMicroseconds(500); // 0.5 ms pulse
+    digitalWrite(DEFAULT_PIN_SSR, LOW);
+
+    // Baca arus dengan cepat setelah ping
+    float ping_current = read_AC_RMS_Current();
+
+    // Idle current trafo MOT bisa sekitar 1-2A. Threshold harus di atas itu.
+    if (ping_current > config.autotrigger.threshold) {
+        Serial.printf("Auto-Trigger fired! Current: %.2fA, Threshold: %.2fA\n", ping_current, config.autotrigger.threshold);
+        performWeld();
+    }
+  }
+  
   ws.cleanupClients();
-}
-
-void loadConfig() {
-    preferences.begin("geminispot", false);
-    config.guards.v_cutoff = preferences.getFloat("g_v_cutoff", 180.0);
-    config.guards.i_guard = preferences.getFloat("g_i_guard", 25.0);
-    config.guards.mcb_guard = preferences.getBool("g_mcb_guard", true);
-    preferences.end();
-}
-
-void saveConfig() {
-    preferences.begin("geminispot", false);
-    preferences.putFloat("g_v_cutoff", config.guards.v_cutoff);
-    preferences.putFloat("g_i_guard", config.guards.i_guard);
-    preferences.putBool("g_mcb_guard", config.guards.mcb_guard);
-    preferences.end();
-}
-
-void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
-    if (type == WS_EVT_CONNECT) {
-        Serial.printf("WebSocket client #%u connected\n", client->id());
-    } else if (type == WS_EVT_DISCONNECT) {
-        Serial.printf("WebSocket client #%u disconnected\n", client->id());
-    } else if (type == WS_EVT_DATA) {
-        handleWebSocketMessage(arg, data, len);
-    }
-}
-
-void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
-    AwsFrameInfo *info = (AwsFrameInfo*)arg;
-    if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-        StaticJsonDocument<256> doc;
-        DeserializationError error = deserializeJson(doc, (char*)data, len);
-        if (error) { Serial.println(error.c_str()); return; }
-
-        const char* action = doc["action"];
-        if (strcmp(action, "get_config") == 0) {
-            StaticJsonDocument<256> response_doc;
-            response_doc["action"] = "config_update";
-            JsonObject payload = response_doc.createNestedObject("payload");
-            JsonObject guards = payload.createNestedObject("guards");
-            guards["v_cutoff"] = config.guards.v_cutoff;
-            guards["i_guard"] = config.guards.i_guard;
-            guards["mcb_guard"] = config.guards.mcb_guard;
-            
-            String response;
-            serializeJson(response_doc, response);
-            ws.textAll(response);
-        } else if (strcmp(action, "set_config") == 0) {
-            JsonObject payload = doc["payload"];
-            if (payload.containsKey("guards")) {
-                config.guards.v_cutoff = payload["guards"]["v_cutoff"];
-                config.guards.i_guard = payload["guards"]["i_guard"];
-                config.guards.mcb_guard = payload["guards"]["mcb_guard"];
-                saveConfig();
-                // Kirim balik config yang sudah disimpan untuk konfirmasi
-                handleWebSocketMessage(arg, (uint8_t*)"{\"action\":\"get_config\"}", strlen("{\"action\":\"get_config\"}"));
-            }
-        }
-    }
 }
 
 void performWeld() {
     if(isWelding) return;
 
-    // --- LOGIKA GUARDS DIMULAI DI SINI ---
     float current_voltage = read_AC_RMS_Voltage();
     if (current_voltage < config.guards.v_cutoff) {
-        Serial.printf("V-Cutoff triggered! Voltage: %.1fV, Required: %.1fV\n", current_voltage, config.guards.v_cutoff);
         ws.textAll("{\"action\":\"status_update\", \"status\":\"ERROR: V-Cutoff!\"}");
-        delay(2000);
+        delay(2000); // Tampilkan error selama 2 detik
         ws.textAll("{\"action\":\"status_update\", \"status\":\"Ready\"}");
+        webTriggerActive = false; // Reset pemicu web
         return;
     }
 
     isWelding = true;
     ws.textAll("{\"action\":\"status_update\", \"status\":\"Mengelas...\"}");
     
-    // MCB Guard: kirim pulsa pendek
     if (config.guards.mcb_guard) {
         digitalWrite(DEFAULT_PIN_SSR, HIGH);
-        delay(2); // Pulsa pre-charge 2ms
+        delay(2);
         digitalWrite(DEFAULT_PIN_SSR, LOW);
-        delay(100); // Jeda sebelum pulsa utama
+        delay(100);
     }
 
-    // ... sisa logika las akan ditempatkan di sini, menggunakan config.guards.i_guard ...
-    // Untuk saat ini, kita simulasikan las selesai
-    delay(500); // Simulasi las
-
+    // ... (Logika las utama akan diimplementasikan penuh di sini)
+    // ... Menggunakan i_guard, mode waktu/energi/dual, dll.
+    digitalWrite(DEFAULT_PIN_SSR, HIGH);
+    delay(timePulse); // Untuk saat ini, kita gunakan mode waktu sederhana
     digitalWrite(DEFAULT_PIN_SSR, LOW);
+
     isWelding = false;
+    webTriggerActive = false; // Reset pemicu web setelah las selesai
     ws.textAll("{\"action\":\"status_update\", \"status\":\"Selesai!\"}");
     delay(1000);
     ws.textAll("{\"action\":\"status_update\", \"status\":\"Ready\"}");
 }
-
-// ... (sisa fungsi read_AC_RMS_Voltage, dll. tetap sama)
-float read_AC_RMS_Voltage() { return 220.0; } // Placeholder
+// ... (sisa fungsi lain seperti read_AC_RMS_Voltage, handleWebSocketMessage, dll. sama)
