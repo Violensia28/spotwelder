@@ -1,0 +1,50 @@
+# Nama workflow yang akan tampil di tab Actions GitHub
+name: Build GeminiSpot Firmware
+
+# Pemicu (trigger) untuk menjalankan workflow
+on:
+  # Dijalankan saat ada push ke branch 'main'
+  push:
+    branches:
+      - main
+  # Memungkinkan untuk dijalankan secara manual dari halaman Actions
+  workflow_dispatch:
+
+jobs:
+  # Satu-satunya job dalam workflow ini bernama 'build-firmware'
+  build-firmware:
+    # Menggunakan runner Ubuntu versi terbaru
+    runs-on: ubuntu-latest
+
+    steps:
+      # Langkah 1: Checkout kode dari repositori Anda
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      # Langkah 2: Menyiapkan lingkungan Python
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # Langkah 3: Meng-install PlatformIO Core
+      - name: Install PlatformIO Core
+        run: pip install -U platformio
+
+      # Langkah 4: Meng-compile firmware menggunakan PlatformIO
+      # Ganti 'esp32dev' jika environment di platformio.ini Anda berbeda
+      - name: Build firmware
+        run: pio run -e esp32dev
+
+      # Langkah 5: Mengunggah hasil build sebagai artefak
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Nama file .zip yang akan dihasilkan
+          name: geminispot-firmware
+          # File-file yang akan dimasukkan ke dalam artefak
+          path: |
+            .pio/build/esp32dev/firmware.bin
+            .pio/build/esp32dev/bootloader.bin
+            .pio/build/esp32dev/partitions.bin
+            
