@@ -5,14 +5,14 @@
 
 // --- DEKLARASI FUNGSI (PROTOTYPE) ---
 void performWeld();
-float read_AC_RMS_Current(); // <--- TAMBAHAN PERBAIKAN
-float read_AC_RMS_Voltage(); // <--- TAMBAHAN PERBAIKAN
+float read_AC_RMS_Current();
+float read_AC_RMS_Voltage();
+void loadConfig();
+void saveConfig();
+void handleWebSocketMessage(void *arg, uint8_t *data, size_t len);
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
 
-// --- OBJEK & KONFIGURASI ---
-Preferences preferences;
-AsyncWebServer server(80);
-AsyncWebSocket ws("/ws");
-
+// --- KONFIGURASI JARINGAN ---
 const char* ssid = "GeminiSpot_WIFI";
 const char* password = "password123";
 
@@ -22,7 +22,16 @@ const char* password = "password123";
 #define DEFAULT_PIN_ACS 35
 #define DEFAULT_PIN_ZMPT 32
 
-// --- STRUKTUR DATA KONFIGURASI ---
+// --- PENGATURAN KESELAMATAN & SENSOR (BLOK YANG HILANG) ---
+#define MAX_PRIMARY_CURRENT 25.0f
+#define ACS712_SENSITIVITY 0.066f
+#define VOLTAGE_CALIBRATION 1300.0f
+
+// --- OBJEK & VARIABEL GLOBAL ---
+Preferences preferences;
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
 struct Config {
     struct Guards {
         float v_cutoff = 180.0;
@@ -31,12 +40,11 @@ struct Config {
     } guards;
     struct AutoTrigger {
         bool enabled = false;
-        float threshold = 3.5; // Threshold dalam Ampere
-        int ping_interval = 100; // ms
+        float threshold = 3.5;
+        int ping_interval = 100;
     } autotrigger;
 } config;
 
-// --- VARIABEL RUNTIME ---
 enum WeldMode { TIME_MODE, ENERGY_MODE, DUAL_PULSE_MODE } currentMode = TIME_MODE;
 long timePulse = 20;
 bool isWelding = false;
@@ -111,9 +119,6 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-
-// --- FUNGSI SETUP & LOOP ---
-
 void setup() {
   Serial.begin(115200);
   loadConfig(); 
@@ -138,7 +143,7 @@ void setup() {
     request->send_P(200, "text/html", index_html);
   });
   server.begin();
-  Serial.println("GeminiSpot W-Series W3 (Fix) Initialized.");
+  Serial.println("GeminiSpot W-Series W3 (Final Fix) Initialized.");
 }
 
 void loop() {
@@ -161,8 +166,6 @@ void loop() {
   }
   ws.cleanupClients();
 }
-
-// --- FUNGSI LOGIKA & PEMBANTU ---
 
 void loadConfig() {
     preferences.begin("geminispot", false);
@@ -194,7 +197,6 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
     StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, (char*)data, len);
     if (error) { return; }
-
     const char* action = doc["action"];
     if (strcmp(action, "get_config") == 0) {
         StaticJsonDocument<512> response_doc;
@@ -222,7 +224,6 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
             config.autotrigger.threshold = payload["autotrigger"]["threshold"];
         }
         saveConfig();
-        // Kirim balik config yang sudah disimpan untuk konfirmasi
         handleWebSocketMessage(arg, (uint8_t*)"{\"action\":\"get_config\"}", 21);
     } else if (strcmp(action, "weld_trigger") == 0){
         webTriggerActive = doc["value"];
