@@ -204,7 +204,4 @@
  .pio/libdeps/esp32dev/ESP\ Async\ WebServer/src/AsyncWebSocket.h \
  .pio/libdeps/esp32dev/ESP\ Async\ WebServer/src/AsyncWebSynchronization.h \
  .pio/libdeps/esp32dev/ESP\ Async\ WebServer/src/AsyncEventSource.h \
- .pio/libdeps/esp32dev/ArduinoJson/src/ArduinoJson.h \
- .pio/libdeps/esp32dev/ArduinoJson/src/ArduinoJson.hpp \
- .pio/libdeps/esp32dev/ArduinoJson/src/ArduinoJson/Configuration.hpp \
- /home/runner/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src/Preferences.h
+ /home/runner/.platformio/packages/framework-arduinoespressif32/libraries/EEPROM/src/EEPROM.h
