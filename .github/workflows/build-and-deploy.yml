@@ -1,4 +1,5 @@
 name: Build and Deploy GeminiSpot Flasher
+
 on:
   push:
     branches:
@@ -14,7 +15,7 @@ jobs:
       
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # Versi diperbarui ke v4
 
       - name: Set up Python 3.9
         uses: actions/setup-python@v4
@@ -27,8 +28,14 @@ jobs:
       - name: Compile firmware
         run: pio run -e esp32dev
 
-      - name: Prepare deploy folder
-        run: |
-          mkdir -p gh-pages/
-          cp .pio/build/esp32dev/firmware.bin gh
+      - name: Deploy firmware.bin to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .pio/build/esp32dev
+          # Opsi tambahan (opsional)
+          # publish_branch: gh-pages # Branch tujuan (default: gh-pages)
+          # user_name: 'github-actions[bot]'
+          # user_email: 'github-actions[bot]@users.noreply.github.com'
+          # commit_message: ${{ github.event.head_commit.message }}
           
