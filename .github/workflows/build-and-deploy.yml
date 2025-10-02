@@ -1,0 +1,65 @@
+name: Build and Deploy GeminiSpot Flasher
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install PlatformIO Core
+        run: pip install -U platformio
+
+      - name: Compile firmware
+        run: pio run -e esp32dev
+
+      - name: Prepare deploy folder
+        run: |
+          mkdir -p gh-pages/
+          cp .pio/build/esp32dev/firmware.bin gh-pages/firmware.bin
+          cat <<EOF > gh-pages/index.html
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>GeminiSpot Flasher</title>
+            <script type="module" src="https://unpkg.com/esp-web-tools@9.0.3/dist/web/install-button.js?module"></script>
+          </head>
+          <body>
+            <h1>GeminiSpot Web Flasher (V2.3)</h1>
+            <p>Sambungkan ESP32 Anda ke HP via kabel OTG, lalu klik tombol di bawah ini.</p>
+            <esp-web-install-button manifest="json"></esp-web-install-button>
+          </body>
+          </html>
+          EOF
+          cat <<EOF > gh-pages/manifest.json
+          {
+            "name": "GeminiSpot Welder",
+            "version": "2.3",
+            "new_install_prompt_erase": true,
+            "builds": [
+              {
+                "chipFamily": "ESP32",
+                "parts": [
+                  { "path": "firmware.bin", "offset": 4096 }
+                ]
+              }
+            ]
+          }
+          EOF
+          
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages
+          
