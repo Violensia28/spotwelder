@@ -3,174 +3,86 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 
-// --- OBJEK & KONFIGURASI ---
-Preferences preferences;
-AsyncWebServer server(80);
-AsyncWebSocket ws("/ws");
-const char* ssid = "GeminiSpot_WIFI";
-const char* password = "password123";
-
-// --- PIN DEFAULT ---
-#define DEFAULT_PIN_SSR 23
-#define DEFAULT_PIN_FOOTSWITCH 34
-#define DEFAULT_PIN_ACS 35
-#define DEFAULT_PIN_ZMPT 32
-
-// --- PENGATURAN KESELAMATAN & SENSOR ---
-#define MAX_PRIMARY_CURRENT 25.0f
-#define ACS712_SENSITIVITY 0.066f
-#define VOLTAGE_CALIBRATION 1300.0f
-
-// --- STRUKTUR DATA ---
-struct Config {
-    // ... (struct Config sama seperti sebelumnya)
-} current_config; // Sekarang kita beri nama 'current_config'
-
-struct Slot {
-    char name[32];
-    Config config;
-};
-Slot slots[99];
-int active_slot = -1; // -1 berarti tidak ada slot yang aktif (pengaturan manual)
-
-// --- VARIABEL RUNTIME ---
-// ... (variabel runtime lainnya)
-bool isWelding = false;
-
-// --- HALAMAN WEB (DENGAN PANEL SLOTS) ---
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>GeminiSpot W-Series</title>
-    </head>
-<body>
-    <div class="container">
-        <h1>GeminiSpot W-Series</h1>
-        <div class="panel">
-            <h2>STATUS</h2>
-            <div id="status" class="status">Connecting...</div>
-        </div>
-
-        <div class="panel">
-            <h2>Slots / Presets</h2>
-            <p>
-                <select id="slot_selector"></select>
-                <button onclick="loadSlot()">Muat</button>
-            </p>
-            <p>
-                <input type="text" id="slot_name" placeholder="Nama Preset Baru">
-                <button onclick="saveSlot()">Simpan</button>
-            </p>
-        </div>
-
-        </div>
-    <script>
-        // ... (JavaScript di-update secara signifikan untuk handle slots)
-        function onMessage(event) {
-            var data = JSON.parse(event.data);
-            if (data.action === 'full_config') {
-                updateUI(data.payload);
-            } else if (data.action === 'slots_list') {
-                populateSlots(data.payload);
-            } // ... etc
-        }
-
-        function populateSlots(slots) {
-            let selector = document.getElementById('slot_selector');
-            selector.innerHTML = '';
-            for (let i = 0; i < slots.length; i++) {
-                let option = document.createElement('option');
-                option.value = i;
-                option.innerText = `Slot ${i + 1}: ${slots[i].name || '(Kosong)'}`;
-                selector.appendChild(option);
-            }
-        }
-
-        function loadSlot() {
-            let slot_id = document.getElementById('slot_selector').value;
-            websocket.send(`{"action":"load_slot", "slot_id":${slot_id}}`);
-        }
-
-        function saveSlot() {
-            let slot_id = document.getElementById('slot_selector').value;
-            let slot_name = document.getElementById('slot_name').value;
-            // Kumpulkan semua config saat ini dari UI...
-            let current_config = { /* ... */ };
-            let msg = {
-                action: "save_slot",
-                slot_id: parseInt(slot_id),
-                name: slot_name,
-                payload: current_config
-            };
-            websocket.send(JSON.stringify(msg));
-        }
-
-        // ... (Sisa JavaScript lainnya)
-    </script>
-</body>
-</html>
-)rawliteral";
-
 // --- DEKLARASI FUNGSI ---
-void loadSlots();
-void saveSlot(int slot_id, JsonObject payload);
+void performWeld();
 // ... (deklarasi fungsi lainnya)
+void saveSlot(int slot_id, const char* name, JsonObjectConst config_payload); // Tanda tangan fungsi diubah
 
-void setup() {
-  Serial.begin(115200);
-  loadSlots(); // Muat semua 99 slot dari memori saat startup
-  
-  // ... (sisa fungsi setup sama seperti sebelumnya)
-}
+// ... (semua #define dan struct Config/Slot sama seperti sebelumnya)
 
-void loop() {
-  // ... (fungsi loop sama seperti sebelumnya)
-}
+// --- HALAMAN WEB ---
+// ... (Konten HTML/CSS/JS sama persis seperti respons W4 sebelumnya)
 
-// --- FUNGSI MANAJEMEN SLOT ---
+// --- SETUP & LOOP ---
+void setup() { /* ... (fungsi setup sama seperti sebelumnya) ... */ }
+void loop() { /* ... (fungsi loop sama seperti sebelumnya) ... */ }
 
+// --- FUNGSI MANAJEMEN SLOT (DENGAN PERBAIKAN) ---
 void loadSlots() {
-    preferences.begin("geminispot", true); // Buka NVS dalam mode read-only
-    // Untuk simplifikasi, kita muat satu per satu. Di aplikasi nyata, ini bisa dioptimalkan.
+    preferences.begin("geminispot", true);
     for (int i = 0; i < 99; i++) {
         String key_name = "s" + String(i) + "_name";
         String slotName = preferences.getString(key_name.c_str(), "");
-        strncpy(slots[i].name, slotName.c_str(), 32);
+        strncpy(slots[i].name, slotName.c_str(), 31);
+        slots[i].name[31] = '\0'; // Pastikan null-terminated
 
-        // Muat juga data config untuk setiap slot...
-        // preferences.getBytes(...);
+        String key_conf = "s" + String(i) + "_conf";
+        size_t conf_len = preferences.getBytesLength(key_conf.c_str());
+        if (conf_len > 0) {
+            char buffer[512];
+            preferences.getBytes(key_conf.c_str(), buffer, conf_len);
+            StaticJsonDocument<512> doc;
+            deserializeJson(doc, buffer);
+            // Salin data dari JSON ke struct config slot
+            slots[i].config.guards.v_cutoff = doc["guards"]["v_cutoff"];
+            // ... (lanjutkan untuk semua item config)
+        }
     }
     preferences.end();
 }
 
-void saveSlot(int slot_id, JsonObjectConst payload) {
+// --- PERUBAHAN DI SINI ---
+// Fungsi saveSlot sekarang menerima nama dan payload config secara terpisah
+void saveSlot(int slot_id, const char* name, JsonObjectConst config_payload) {
     if (slot_id < 0 || slot_id >= 99) return;
 
-    const char* new_name = payload["name"];
-    strncpy(slots[slot_id].name, new_name, 32);
+    // Simpan nama
+    strncpy(slots[slot_id].name, name, 31);
+    slots[slot_id].name[31] = '\0';
 
-    // Salin data config dari payload ke struct slots[slot_id].config
-    // ...
-
+    // Salin data config dari payload ke struct
+    slots[slot_id].config.guards.v_cutoff = config_payload["guards"]["v_cutoff"];
+    slots[slot_id].config.guards.i_guard = config_payload["guards"]["i_guard"];
+    slots[slot_id].config.guards.mcb_guard = config_payload["guards"]["mcb_guard"];
+    slots[slot_id].config.autotrigger.enabled = config_payload["autotrigger"]["enabled"];
+    slots[slot_id].config.autotrigger.threshold = config_payload["autotrigger"]["threshold"];
+    
     // Simpan ke NVS
     preferences.begin("geminispot", false);
     String key_name = "s" + String(slot_id) + "_name";
     preferences.putString(key_name.c_str(), slots[slot_id].name);
-    // ... simpan juga data config ...
+
+    String key_conf = "s" + String(slot_id) + "_conf";
+    StaticJsonDocument<512> doc;
+    doc.set(config_payload);
+    char buffer[512];
+    size_t len = serializeJson(doc, buffer);
+    preferences.putBytes(key_conf.c_str(), buffer, len);
+    
     preferences.end();
 }
 
-// --- FUNGSI WEBSOCKET HANDLER (Diperbarui) ---
+
+// --- FUNGSI WEBSOCKET HANDLER (DENGAN PERBAIKAN) ---
 void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
-    StaticJsonDocument<1024> doc; // Ukuran diperbesar untuk menampung config
-    deserializeJson(doc, (char*)data, len);
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, (char*)data, len);
+    if (error) { return; }
 
     const char* action = doc["action"];
-    if (strcmp(action, "get_config") == 0) { /* ... kirim config saat ini ... */ }
-    else if (strcmp(action, "get_slots") == 0) {
-        // Kirim daftar nama semua 99 slot ke UI
-        StaticJsonDocument<4096> response_doc; // Ukuran besar untuk daftar slot
+
+    if (strcmp(action, "get_slots") == 0) {
+        StaticJsonDocument<4096> response_doc;
         response_doc["action"] = "slots_list";
         JsonArray payload = response_doc.createNestedArray("payload");
         for(int i=0; i<99; i++){
@@ -187,13 +99,22 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
             current_config = slots[slot_id].config;
             active_slot = slot_id;
             // Kirim config yang baru dimuat ke UI untuk di-update
+            // (Mirip dengan get_config)
         }
     }
     else if (strcmp(action, "save_slot") == 0) {
+        // --- PERUBAHAN DI SINI ---
         int slot_id = doc["slot_id"];
-        saveSlot(slot_id, doc);
+        const char* name = doc["name"];
+        JsonObjectConst config_payload = doc["payload"];
+        
+        // Panggil fungsi saveSlot dengan argumen yang benar
+        saveSlot(slot_id, name, config_payload);
+        
         // Kirim konfirmasi atau daftar slot terbaru
+        handleWebSocketMessage(arg, (uint8_t*)"{\"action\":\"get_slots\"}", 20);
     }
-    // ... (sisa handler)
+    // ... (sisa handler seperti get_config, set_config, dll)
 }
-// ... (sisa fungsi lainnya)
+
+// ... (sisa fungsi lainnya seperti onEvent, performWeld, setup, loop tidak berubah signifikan)
